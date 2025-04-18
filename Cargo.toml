@@ -1,0 +1,7 @@
+[package]
+name = "flac-encoder"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+libflac-sys = "0.3.2"
