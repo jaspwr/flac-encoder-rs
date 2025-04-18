@@ -1,36 +1,42 @@
-use std::{
-    ffi::c_char,
-    mem::zeroed,
-    ptr::null_mut, slice::from_raw_parts,
-};
+use std::{ffi::c_char, mem::zeroed, path::PathBuf, ptr::null_mut, slice::from_raw_parts};
 
 use libflac_sys::*;
 
 pub struct FlacBuilder<'data, Sample>
-    where Sample : IntoSample
+where
+    Sample: IntoSample,
 {
     data: &'data Vec<Vec<Sample>>,
-    bps: u32,
+    bps: BpsLevel,
     sample_rate: u32,
+    output_path: Option<String>,
     compression_level: u32,
     padding: u32,
     vorbis_commenets: Vec<(String, String)>,
+    metadata_blocks: Vec<*mut FLAC__StreamMetadata>,
 }
 
-impl<'data, Sample : IntoSample> FlacBuilder<'data, Sample> {
+impl<'data, Sample: IntoSample> FlacBuilder<'data, Sample> {
     pub fn new(data: &'data Vec<Vec<Sample>>, sample_rate: u32) -> Self {
         FlacBuilder {
             data,
             sample_rate,
-            bps: 16,
+            bps: BpsLevel::Bps16,
             compression_level: 5,
             padding: 500,
             vorbis_commenets: vec![],
+            metadata_blocks: vec![],
+            output_path: None,
         }
     }
 
     pub fn compression_level(mut self, level: u32) -> Self {
         self.compression_level = level;
+        self
+    }
+
+    pub fn bps(mut self, bps: BpsLevel) -> Self {
+        self.bps = bps;
         self
     }
 
@@ -40,123 +46,131 @@ impl<'data, Sample : IntoSample> FlacBuilder<'data, Sample> {
     }
 
     pub fn artist(self, artist: &str) -> Self {
-        self.set_vorbis_comment("ARTIST", artist)
+        self.vorbis_comment("ARTIST", artist)
     }
 
     pub fn year(self, year: u32) -> Self {
-        self.set_vorbis_comment("YEAR", &year.to_string())
+        self.vorbis_comment("YEAR", &year.to_string())
     }
 
-    pub fn set_vorbis_comment(mut self, key: &str, value: &str) -> Self {
+    pub fn vorbis_comment(mut self, key: &str, value: &str) -> Self {
         self.vorbis_commenets
             .push((format!("{}\0", key), format!("{}\0", value)));
         self
     }
 
-    pub fn build(&self) -> Result<Vec<u8>, EncoderError> {
+    pub fn output_path(mut self, path: PathBuf) -> Self {
+        self.output_path = Some(format!("{}\0", path.display()).to_string());
+        self
+    }
+
+    fn total_samples(&self) -> usize {
+        self.data.iter().map(|channel| channel.len()).sum()
+    }
+
+    unsafe fn prepare(&mut self) -> Result<*mut FLAC__StreamEncoder, EncoderError> {
         if self.data.is_empty() {
-            return Err(EncoderError::NoData);            
+            return Err(EncoderError::NoData);
         }
 
-        unsafe {
-            if self.bps != 16 && self.bps != 20 && self.bps != 24 {
-                return Err(EncoderError::InvalidBps);
+        let encoder = FLAC__stream_encoder_new();
+
+        if encoder.is_null() {
+            return Err(EncoderError::InitializationError);
+        }
+
+        if 0 == FLAC__stream_encoder_set_verify(encoder, 1) {
+            return Err(EncoderError::VerificationError);
+        }
+
+        if 0 == FLAC__stream_encoder_set_compression_level(encoder, self.compression_level) {
+            return Err(EncoderError::InvalidCompressionLevel);
+        }
+
+        let channels = self.data.len();
+
+        if 0 == FLAC__stream_encoder_set_channels(encoder, channels as u32) {
+            return Err(EncoderError::InvalidChannelCount);
+        }
+
+        if 0 == FLAC__stream_encoder_set_bits_per_sample(encoder, self.bps.to_u32()) {
+            return Err(EncoderError::InvalidSampleType);
+        }
+
+        if 0 == FLAC__stream_encoder_set_sample_rate(encoder, self.sample_rate) {
+            return Err(EncoderError::InvalidSampleRate);
+        }
+
+        if 0 == FLAC__stream_encoder_set_total_samples_estimate(
+            encoder,
+            self.total_samples() as u64,
+        ) {
+            return Err(EncoderError::TooManyOrTooFewSamples);
+        }
+
+        // Metadata
+
+        if self.vorbis_commenets.is_empty() {
+            if 0 == FLAC__stream_encoder_set_metadata(encoder, null_mut(), 0) {
+                return Err(EncoderError::FailedToSetMetadata);
             }
+        }
 
-            let encoder = FLAC__stream_encoder_new();
+        if !self.vorbis_commenets.is_empty() {
+            let metadata_block = FLAC__metadata_object_new(FLAC__METADATA_TYPE_VORBIS_COMMENT);
 
-            if encoder.is_null() {
+            if metadata_block.is_null() {
                 return Err(EncoderError::InitializationError);
             }
 
-            if 0 == FLAC__stream_encoder_set_verify(encoder, 1) {
-                return Err(EncoderError::VerificationError);
-            }
+            for (key, value) in &self.vorbis_commenets {
+                let mut entry: FLAC__StreamMetadata_VorbisComment_Entry = zeroed();
 
-            if 0 == FLAC__stream_encoder_set_compression_level(encoder, self.compression_level) {
-                return Err(EncoderError::InvalidCompressionLevel);
-            }
+                if 0 == FLAC__metadata_object_vorbiscomment_entry_from_name_value_pair(
+                    &mut entry,
+                    key.as_bytes().as_ptr() as *const c_char,
+                    value.as_bytes().as_ptr() as *const c_char,
+                ) {
+                    return Err(EncoderError::InvalidVorbisComment(key.clone()));
+                }
 
-            let channels = self.data.len();
-
-            if 0 == FLAC__stream_encoder_set_channels(encoder, channels as u32) {
-                return Err(EncoderError::InvalidChannelCount);
-            }
-
-            if 0 == FLAC__stream_encoder_set_bits_per_sample(encoder, self.bps) {
-                return Err(EncoderError::InvalidSampleType);
-            }
-
-            if 0 == FLAC__stream_encoder_set_sample_rate(encoder, self.sample_rate) {
-                return Err(EncoderError::InvalidSampleRate);
-            }
-
-            let total_samples = self
-                .data
-                .iter()
-                .map(|channel| channel.len() as u64)
-                .sum::<u64>();
-
-            if 0 == FLAC__stream_encoder_set_total_samples_estimate(encoder, total_samples) {
-                return Err(EncoderError::TooManyOrTooFewSamples);
-            }
-
-            // Metadata
-
-            if self.vorbis_commenets.is_empty() {
-                if 0 == FLAC__stream_encoder_set_metadata(encoder, null_mut(), 0) {
+                if 0 == FLAC__metadata_object_vorbiscomment_append_comment(metadata_block, entry, 0)
+                {
                     return Err(EncoderError::FailedToSetMetadata);
                 }
             }
 
-            let mut metadata_block = null_mut();
-            let mut padding_block = FLAC__metadata_object_new(FLAC__METADATA_TYPE_PADDING);
-            (*padding_block).length = padding;
+            self.metadata_blocks.push(metadata_block);
+        }
 
-            if !self.vorbis_commenets.is_empty() {
-                metadata_block = FLAC__metadata_object_new(FLAC__METADATA_TYPE_VORBIS_COMMENT);
+        let padding_block = FLAC__metadata_object_new(FLAC__METADATA_TYPE_PADDING);
+        if !padding_block.is_null() {
+            (*padding_block).length = self.padding;
+            self.metadata_blocks.push(padding_block);
+        }
 
-                if metadata_block.is_null() {
-                    return Err(EncoderError::InitializationError);
-                }
+        if 0 == FLAC__stream_encoder_set_metadata(
+            encoder,
+            self.metadata_blocks.as_mut_ptr(),
+            self.metadata_blocks.len() as u32,
+        ) {
+            return Err(EncoderError::FailedToSetMetadata);
+        }
 
-                for (key, value) in &self.vorbis_commenets {
-                    let mut entry: FLAC__StreamMetadata_VorbisComment_Entry = zeroed();
+        Ok(encoder)
+    }
 
-                    if 0 == FLAC__metadata_object_vorbiscomment_entry_from_name_value_pair(
-                        &mut entry,
-                        key.as_bytes().as_ptr() as *const c_char,
-                        value.as_bytes().as_ptr() as *const c_char,
-                    ) {
-                        return Err(EncoderError::InvalidVorbisComment(key.clone()));
-                    }
+    unsafe fn cleanup(&mut self) {
+        for block in self.metadata_blocks.iter() {
+            FLAC__metadata_object_delete(*block);
+        }
+        self.metadata_blocks.clear();
+    }
 
-                    if 0 == FLAC__metadata_object_vorbiscomment_append_comment(
-                        metadata_block,
-                        entry,
-                        0,
-                    ) {
-                        return Err(EncoderError::FailedToSetMetadata);
-                    }
-                }
-            }
-
-            if self.vorbis_commenets.is_empty() {
-                let blocks = &mut padding_block;
-                if 0 == FLAC__stream_encoder_set_metadata(encoder, blocks as *mut _, 1) {
-                    return Err(EncoderError::FailedToSetMetadata);
-                }
-            } else {
-                let mut blocks = vec![metadata_block, padding_block];
-                if 0 == FLAC__stream_encoder_set_metadata(encoder, blocks.as_mut_ptr(), 2) {
-                    return Err(EncoderError::FailedToSetMetadata);
-                }
-            }
-
-            // Encoding
-
-            // Interleaved, right aligned input data
-            let mut input_data: Vec<FLAC__int32> = Vec::with_capacity(total_samples as usize);
+    pub fn build(mut self) -> Result<Vec<u8>, EncoderError> {
+        unsafe {
+            let encoder = self.prepare()?;
+            let mut input_data: Vec<FLAC__int32> = Vec::with_capacity(self.total_samples());
 
             let mut samples_count = None;
 
@@ -164,20 +178,19 @@ impl<'data, Sample : IntoSample> FlacBuilder<'data, Sample> {
                 if samples_count.is_none() {
                     samples_count = Some(channel.len());
                 } else if samples_count.unwrap() != channel.len() {
+                    self.cleanup();
                     return Err(EncoderError::MismatchedSampleCountPerChannels);
                 }
             }
 
             for sample_i in 0..samples_count.unwrap() {
                 for channel_i in 0..self.data.len() {
-                    input_data.push(self.data[channel_i][sample_i].to_i16() as FLAC__int32);
-                    // input_data.push(1);
+                    input_data.push(self.data[channel_i][sample_i].to_bps_level(self.bps));
                 }
             }
 
-            let mut output_data = Vec::with_capacity(
-                samples_count.unwrap_or(0) * self.data.len() as usize,
-            );
+            let mut output_data =
+                Vec::with_capacity(samples_count.unwrap_or(0) * self.data.len() as usize);
             let mut cursor = 0;
 
             let callback_data = WriteCallbackData {
@@ -185,18 +198,22 @@ impl<'data, Sample : IntoSample> FlacBuilder<'data, Sample> {
                 cursor: &mut cursor,
             };
 
-            FLAC__stream_encoder_init_stream(
-                encoder,
-                Some(write_callback),
-                Some(seek_callback),
-                Some(tell_callback),
-                None,
-                &callback_data as *const _ as *mut _,
-            );
-
-            // FLAC__stream_encoder_init_file(encoder, b"C:/Users/jaspe/Downloads/aaaaa.flac\0".as_ptr() as *const _, None, null_mut());
+            if let Some(path) = self.output_path.clone() {
+                FLAC__stream_encoder_init_file(encoder, path.as_bytes().as_ptr() as *const _, None, null_mut());
+            } else {
+                FLAC__stream_encoder_init_stream(
+                    encoder,
+                    Some(write_callback),
+                    Some(seek_callback),
+                    Some(tell_callback),
+                    None,
+                    &callback_data as *const _ as *mut _,
+                );
+            }
 
             let mut ok = 0;
+
+            let channels = self.data.len();
 
             let block_size: usize = 1024 * channels;
             let mut input_cursor = 0;
@@ -219,19 +236,30 @@ impl<'data, Sample : IntoSample> FlacBuilder<'data, Sample> {
 
             ok |= FLAC__stream_encoder_finish(encoder);
 
+            self.cleanup();
+
             if ok == 0 {
                 return Err(EncoderError::EncodingError);
             }
 
-            if !metadata_block.is_null() {
-                FLAC__metadata_object_delete(metadata_block);
-            }
-
-            if !padding_block.is_null() {
-                FLAC__metadata_object_delete(padding_block);
-            }
-
             Ok(output_data)
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum BpsLevel {
+    Bps16,
+    Bps20,
+    Bps24,
+}
+
+impl BpsLevel {
+    pub fn to_u32(&self) -> u32 {
+        match self {
+            BpsLevel::Bps16 => 16,
+            BpsLevel::Bps20 => 20,
+            BpsLevel::Bps24 => 24,
         }
     }
 }
@@ -262,7 +290,7 @@ unsafe extern "C" fn write_callback(
     for i in 0..bytes {
         data.data[*data.cursor] = new_data[i];
         *data.cursor += 1;
-    } 
+    }
 
     0
 }
@@ -297,7 +325,6 @@ unsafe extern "C" fn tell_callback(
 pub enum EncoderError {
     NoData,
     InitializationError,
-    InvalidBps,
     VerificationError,
     InvalidCompressionLevel,
     InvalidChannelCount,
@@ -311,11 +338,18 @@ pub enum EncoderError {
     InvalidSampleRate,
 }
 
-
 pub trait IntoSample {
     fn to_i16(&self) -> i16;
     fn to_i20(&self) -> i32;
     fn to_i24(&self) -> i32;
+
+    fn to_bps_level(&self, bps: BpsLevel) -> FLAC__int32 {
+        match bps {
+            BpsLevel::Bps16 => self.to_i16() as FLAC__int32,
+            BpsLevel::Bps20 => self.to_i20(),
+            BpsLevel::Bps24 => self.to_i24(),
+        }
+    }
 }
 
 impl IntoSample for f32 {
