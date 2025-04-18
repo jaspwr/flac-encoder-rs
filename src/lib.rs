@@ -49,8 +49,20 @@ impl<'data, Sample: IntoSample> FlacBuilder<'data, Sample> {
         self.vorbis_comment("ARTIST", artist)
     }
 
+    pub fn album(self, album: &str) -> Self {
+        self.vorbis_comment("ALBUM", album)
+    }
+
+    pub fn title(self, title: &str) -> Self {
+        self.vorbis_comment("TITLE", title)
+    }
+
     pub fn year(self, year: u32) -> Self {
         self.vorbis_comment("YEAR", &year.to_string())
+    }
+
+    pub fn track_number(self, number: i32) -> Self {
+        self.vorbis_comment("TRACKNUMBER", &number.to_string())
     }
 
     pub fn vorbis_comment(mut self, key: &str, value: &str) -> Self {
@@ -107,8 +119,6 @@ impl<'data, Sample: IntoSample> FlacBuilder<'data, Sample> {
         ) {
             return Err(EncoderError::TooManyOrTooFewSamples);
         }
-
-        // Metadata
 
         if self.vorbis_commenets.is_empty() {
             if 0 == FLAC__stream_encoder_set_metadata(encoder, null_mut(), 0) {
@@ -168,20 +178,26 @@ impl<'data, Sample: IntoSample> FlacBuilder<'data, Sample> {
     }
 
     pub fn build(mut self) -> Result<Vec<u8>, EncoderError> {
-        unsafe {
-            let encoder = self.prepare()?;
-            let mut input_data: Vec<FLAC__int32> = Vec::with_capacity(self.total_samples());
+        let mut samples_count = None;
 
-            let mut samples_count = None;
-
-            for channel in self.data {
-                if samples_count.is_none() {
-                    samples_count = Some(channel.len());
-                } else if samples_count.unwrap() != channel.len() {
-                    self.cleanup();
-                    return Err(EncoderError::MismatchedSampleCountPerChannels);
-                }
+        for channel in self.data {
+            if samples_count.is_none() {
+                samples_count = Some(channel.len());
+            } else if samples_count.unwrap() != channel.len() {
+                return Err(EncoderError::MismatchedSampleCountPerChannels);
             }
+        }
+
+        unsafe {
+            let encoder = match self.prepare() {
+                Ok(encoder) => encoder,
+                Err(err) => {
+                    self.cleanup();
+                    return Err(err);
+                }
+            };
+
+            let mut input_data: Vec<FLAC__int32> = Vec::with_capacity(self.total_samples());
 
             for sample_i in 0..samples_count.unwrap() {
                 for channel_i in 0..self.data.len() {
