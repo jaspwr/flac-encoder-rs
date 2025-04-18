@@ -21,7 +21,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "flac-encoder-rs"
+name = "flac-encoder"
 version = "0.1.0"
 dependencies = [
  "libflac-sys",

@@ -1,20 +1,20 @@
 use std::{
     ffi::c_char,
     mem::zeroed,
-    ptr::{null, null_mut},
+    ptr::null_mut,
 };
 
 use libflac_sys::*;
 
 pub struct FlacBuilder<'data, Sample> {
-    pub data: &'data [&'data [Sample]],
+    pub data: &'data Vec<Vec<Sample>>,
     pub sample_rate: u32,
     pub compression_level: u32,
     pub vorbis_commenets: Vec<(String, String)>,
 }
 
 impl<'data, Sample> FlacBuilder<'data, Sample> {
-    pub fn new(data: &'data [&'data [Sample]], sample_rate: u32) -> Self {
+    pub fn new(data: &'data Vec<Vec<Sample>>, sample_rate: u32) -> Self {
         FlacBuilder {
             data,
             sample_rate,
@@ -79,6 +79,7 @@ impl<'data, Sample> FlacBuilder<'data, Sample> {
             }
 
             // Metadata
+
             if self.vorbis_commenets.is_empty() {
                 if 0 != FLAC__stream_encoder_set_metadata(encoder, null_mut(), 0) {
                     return Err(EncoderError::FailedToSetMetadata);
