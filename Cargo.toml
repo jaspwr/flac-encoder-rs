@@ -5,6 +5,8 @@ edition = "2021"
 readme = "README.md"
 description = "Rust Flac encoder that uses libflac."
 repository = "https://github.com/jaspwr/flac-encoder-rs"
+license = "LGPL-2.1"
+keywords = ["audio", "flac", "encoder", "libflac"]
 
 [dependencies]
 libflac-sys = "0.3.2"

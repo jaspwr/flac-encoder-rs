@@ -16,12 +16,12 @@ where
     metadata_blocks: Vec<*mut FLAC__StreamMetadata>,
 }
 
-impl<'data, Sample: IntoSample + Copy> FlacBuilder<'data, Sample> {
-    pub fn new_planar(data: &'data Vec<Vec<Sample>>, sample_rate: u32) -> Self {
+impl<'data, Sample: IntoSample + Copy + Default> FlacBuilder<'data, Sample> {
+    pub fn from_planar(data: &'data Vec<Vec<Sample>>, sample_rate: u32) -> Self {
         Self::new(InputData::Planar(data), sample_rate)
     }
 
-    pub fn new_interleaved(data: &'data [Sample], channels: usize, sample_rate: u32) -> Self {
+    pub fn from_interleaved(data: &'data [Sample], channels: usize, sample_rate: u32) -> Self {
         Self::new(InputData::Interleaved { data, channels }, sample_rate)
     }
 
@@ -230,22 +230,25 @@ impl<'data, Sample: IntoSample + Copy> FlacBuilder<'data, Sample> {
 
             let channels = self.data.channel_count();
 
-            let block_size: usize = 1024 * channels;
+            let block_size: usize = 1024;
             let mut input_cursor = 0;
 
-            while input_cursor < self.data.total_samples() {
-                let mut input_data: Vec<FLAC__int32> = Vec::with_capacity(block_size);
+            while input_cursor < self.data.samples_per_channel() {
+                let mut input_data: Vec<FLAC__int32> = Vec::with_capacity(block_size * channels);
 
                 for block_sample_i in 0..block_size {
                     for channel_i in 0..self.data.channel_count() {
                         input_data.push(
                             match &self.data {
-                                InputData::Interleaved { data, channels } => {
-                                    data[input_cursor + block_sample_i * channels + channel_i]
-                                }
-                                InputData::Planar(data) => {
-                                    data[channel_i][input_cursor + block_sample_i]
-                                }
+                                InputData::Interleaved { data, channels } => data
+                                    .get((input_cursor + block_sample_i) * channels + channel_i)
+                                    .copied()
+                                    .unwrap_or(Sample::default()),
+                                InputData::Planar(data) => data
+                                    .get(channel_i)
+                                    .and_then(|c| c.get(input_cursor + block_sample_i))
+                                    .copied()
+                                    .unwrap_or(Sample::default()),
                             }
                             .to_bps_level(self.bps),
                         );
@@ -255,13 +258,12 @@ impl<'data, Sample: IntoSample + Copy> FlacBuilder<'data, Sample> {
                 let remaining = self.data.total_samples() - input_cursor;
                 let used_block_size = block_size.min(remaining);
 
-                let block = &input_data[input_cursor..];
-                let block_ptr = block.as_ptr() as *const FLAC__int32;
+                let block_ptr = input_data.as_ptr() as *const FLAC__int32;
 
                 ok |= FLAC__stream_encoder_process_interleaved(
                     encoder,
                     block_ptr,
-                    (used_block_size / channels) as u32,
+                    (used_block_size) as u32,
                 );
 
                 input_cursor += block_size;
@@ -315,6 +317,18 @@ impl<'a, Sample: IntoSample> InputData<'a, Sample> {
         match self {
             InputData::Interleaved { channels, .. } => *channels,
             InputData::Planar(data) => data.len(),
+        }
+    }
+
+    fn samples_per_channel(&self) -> usize {
+        match self {
+            InputData::Interleaved { data, channels } => data.len() / channels,
+            InputData::Planar(data) => {
+                if data.is_empty() {
+                    return 0;
+                }
+                data[0].len()
+            }
         }
     }
 
