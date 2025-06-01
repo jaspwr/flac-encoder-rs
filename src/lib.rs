@@ -6,7 +6,7 @@ pub struct FlacBuilder<'data, Sample>
 where
     Sample: IntoSample,
 {
-    data: &'data Vec<Vec<Sample>>,
+    data: InputData<'data, Sample>,
     bps: BpsLevel,
     sample_rate: u32,
     output_path: Option<String>,
@@ -16,8 +16,16 @@ where
     metadata_blocks: Vec<*mut FLAC__StreamMetadata>,
 }
 
-impl<'data, Sample: IntoSample> FlacBuilder<'data, Sample> {
-    pub fn new(data: &'data Vec<Vec<Sample>>, sample_rate: u32) -> Self {
+impl<'data, Sample: IntoSample + Copy> FlacBuilder<'data, Sample> {
+    pub fn new_planar(data: &'data Vec<Vec<Sample>>, sample_rate: u32) -> Self {
+        Self::new(InputData::Planar(data), sample_rate)
+    }
+
+    pub fn new_interleaved(data: &'data [Sample], channels: usize, sample_rate: u32) -> Self {
+        Self::new(InputData::Interleaved { data, channels }, sample_rate)
+    }
+
+    pub fn new(data: InputData<'data, Sample>, sample_rate: u32) -> Self {
         FlacBuilder {
             data,
             sample_rate,
@@ -76,12 +84,8 @@ impl<'data, Sample: IntoSample> FlacBuilder<'data, Sample> {
         self
     }
 
-    fn total_samples(&self) -> usize {
-        self.data.iter().map(|channel| channel.len()).sum()
-    }
-
     unsafe fn prepare(&mut self) -> Result<*mut FLAC__StreamEncoder, EncoderError> {
-        if self.data.is_empty() {
+        if self.data.total_samples() == 0 {
             return Err(EncoderError::NoData);
         }
 
@@ -99,7 +103,7 @@ impl<'data, Sample: IntoSample> FlacBuilder<'data, Sample> {
             return Err(EncoderError::InvalidCompressionLevel);
         }
 
-        let channels = self.data.len();
+        let channels = self.data.channel_count();
 
         if 0 == FLAC__stream_encoder_set_channels(encoder, channels as u32) {
             return Err(EncoderError::InvalidChannelCount);
@@ -115,7 +119,7 @@ impl<'data, Sample: IntoSample> FlacBuilder<'data, Sample> {
 
         if 0 == FLAC__stream_encoder_set_total_samples_estimate(
             encoder,
-            self.total_samples() as u64,
+            self.data.total_samples() as u64,
         ) {
             return Err(EncoderError::TooManyOrTooFewSamples);
         }
@@ -177,15 +181,15 @@ impl<'data, Sample: IntoSample> FlacBuilder<'data, Sample> {
         self.metadata_blocks.clear();
     }
 
-    pub fn build(mut self) -> Result<Vec<u8>, EncoderError> {
-        let mut samples_count = None;
+    pub fn write_file<P: Into<PathBuf>>(mut self, path: P) -> Result<(), EncoderError> {
+        self.output_path = Some(format!("{}\0", path.into().display()).to_string());
+        let _ = self.build()?;
+        Ok(())
+    }
 
-        for channel in self.data {
-            if samples_count.is_none() {
-                samples_count = Some(channel.len());
-            } else if samples_count.unwrap() != channel.len() {
-                return Err(EncoderError::MismatchedSampleCountPerChannels);
-            }
+    pub fn build(mut self) -> Result<Vec<u8>, EncoderError> {
+        if !self.data.channel_sizes_match() {
+            return Err(EncoderError::MismatchedSampleCountPerChannels);
         }
 
         unsafe {
@@ -197,45 +201,58 @@ impl<'data, Sample: IntoSample> FlacBuilder<'data, Sample> {
                 }
             };
 
-            let mut input_data: Vec<FLAC__int32> = Vec::with_capacity(self.total_samples());
-
-            for sample_i in 0..samples_count.unwrap() {
-                for channel_i in 0..self.data.len() {
-                    input_data.push(self.data[channel_i][sample_i].to_bps_level(self.bps));
-                }
-            }
-
-            let mut output_data =
-                Vec::with_capacity(samples_count.unwrap_or(0) * self.data.len() as usize);
-            let mut cursor = 0;
-
-            let callback_data = WriteCallbackData {
-                data: &mut output_data,
-                cursor: &mut cursor,
-            };
+            let mut callback_data = None;
 
             if let Some(path) = self.output_path.clone() {
-                FLAC__stream_encoder_init_file(encoder, path.as_bytes().as_ptr() as *const _, None, null_mut());
+                FLAC__stream_encoder_init_file(
+                    encoder,
+                    path.as_bytes().as_ptr() as *const _,
+                    None,
+                    null_mut(),
+                );
             } else {
+                callback_data = Some(WriteCallbackData {
+                    data: Vec::with_capacity(self.data.total_samples()),
+                    cursor: 0,
+                });
+
                 FLAC__stream_encoder_init_stream(
                     encoder,
                     Some(write_callback),
                     Some(seek_callback),
                     Some(tell_callback),
                     None,
-                    &callback_data as *const _ as *mut _,
+                    callback_data.as_ref().unwrap() as *const _ as *mut _,
                 );
             }
 
             let mut ok = 0;
 
-            let channels = self.data.len();
+            let channels = self.data.channel_count();
 
             let block_size: usize = 1024 * channels;
             let mut input_cursor = 0;
 
-            while input_cursor < input_data.len() {
-                let remaining = input_data.len() - input_cursor;
+            while input_cursor < self.data.total_samples() {
+                let mut input_data: Vec<FLAC__int32> = Vec::with_capacity(block_size);
+
+                for block_sample_i in 0..block_size {
+                    for channel_i in 0..self.data.channel_count() {
+                        input_data.push(
+                            match &self.data {
+                                InputData::Interleaved { data, channels } => {
+                                    data[input_cursor + block_sample_i * channels + channel_i]
+                                }
+                                InputData::Planar(data) => {
+                                    data[channel_i][input_cursor + block_sample_i]
+                                }
+                            }
+                            .to_bps_level(self.bps),
+                        );
+                    }
+                }
+
+                let remaining = self.data.total_samples() - input_cursor;
                 let used_block_size = block_size.min(remaining);
 
                 let block = &input_data[input_cursor..];
@@ -258,7 +275,7 @@ impl<'data, Sample: IntoSample> FlacBuilder<'data, Sample> {
                 return Err(EncoderError::EncodingError);
             }
 
-            Ok(output_data)
+            Ok(callback_data.map_or_else(|| vec![], |data| data.data))
         }
     }
 }
@@ -280,9 +297,46 @@ impl BpsLevel {
     }
 }
 
-pub struct WriteCallbackData<'a> {
-    pub data: &'a mut Vec<u8>,
-    pub cursor: &'a mut usize,
+pub struct WriteCallbackData {
+    pub data: Vec<u8>,
+    pub cursor: usize,
+}
+
+pub enum InputData<'a, Sample>
+where
+    Sample: IntoSample,
+{
+    Interleaved { data: &'a [Sample], channels: usize },
+    Planar(&'a Vec<Vec<Sample>>),
+}
+
+impl<'a, Sample: IntoSample> InputData<'a, Sample> {
+    fn channel_count(&self) -> usize {
+        match self {
+            InputData::Interleaved { channels, .. } => *channels,
+            InputData::Planar(data) => data.len(),
+        }
+    }
+
+    fn total_samples(&self) -> usize {
+        match self {
+            InputData::Interleaved { data, .. } => data.len(),
+            InputData::Planar(data) => data.iter().map(|channel| channel.len()).sum(),
+        }
+    }
+
+    fn channel_sizes_match(&self) -> bool {
+        match self {
+            InputData::Interleaved { data, channels } => data.len() % *channels == 0,
+            InputData::Planar(data) => {
+                if data.is_empty() {
+                    return true;
+                }
+                let size = data[0].len();
+                data.iter().all(|channel| channel.len() == size)
+            }
+        }
+    }
 }
 
 #[no_mangle]
@@ -296,16 +350,16 @@ unsafe extern "C" fn write_callback(
 ) -> u32 {
     let data = unsafe { &mut *(client_data as *mut WriteCallbackData) };
 
-    if *data.cursor + bytes > data.data.len() {
-        let needed = (*data.cursor + bytes) - data.data.len();
+    if data.cursor + bytes > data.data.len() {
+        let needed = (data.cursor + bytes) - data.data.len();
         data.data.extend(vec![0u8; needed]);
     }
 
     let new_data = from_raw_parts(buffer, bytes);
 
     for i in 0..bytes {
-        data.data[*data.cursor] = new_data[i];
-        *data.cursor += 1;
+        data.data[data.cursor] = new_data[i];
+        data.cursor += 1;
     }
 
     0
@@ -319,7 +373,7 @@ unsafe extern "C" fn seek_callback(
 ) -> u32 {
     let data = unsafe { &mut *(client_data as *mut WriteCallbackData) };
 
-    *data.cursor = absolute_byte_offset as usize;
+    data.cursor = absolute_byte_offset as usize;
 
     FLAC__STREAM_ENCODER_SEEK_STATUS_OK
 }
@@ -332,7 +386,7 @@ unsafe extern "C" fn tell_callback(
 ) -> u32 {
     let data = unsafe { &mut *(client_data as *mut WriteCallbackData) };
 
-    *absolute_byte_offset = *data.cursor as u64;
+    *absolute_byte_offset = data.cursor as u64;
 
     FLAC__STREAM_ENCODER_SEEK_STATUS_OK
 }
