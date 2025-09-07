@@ -26,15 +26,18 @@ where
 }
 
 impl<'data, Sample: IntoSample> FlacBuilder<'data, Sample> {
+    /// New with planar audio data. The input data must be a list of channels where each channel is
+    /// a list of frames/samples. Samples can be either `f32` or `f64` in range [-1.0, 1.0].
     pub fn from_planar(data: &'data [Vec<Sample>], sample_rate: u32) -> Self {
         Self::new(InputData::Planar(data), sample_rate)
     }
 
+    /// New with interleaved (e.g. LRLRLRLRLRLR) audio data. Samples can be either `f32` or `f64` in range [-1.0, 1.0].
     pub fn from_interleaved(data: &'data [Sample], channels: usize, sample_rate: u32) -> Self {
         Self::new(InputData::Interleaved { data, channels }, sample_rate)
     }
 
-    pub fn new(data: InputData<'data, Sample>, sample_rate: u32) -> Self {
+    fn new(data: InputData<'data, Sample>, sample_rate: u32) -> Self {
         FlacBuilder {
             data,
             sample_rate,
@@ -46,11 +49,13 @@ impl<'data, Sample: IntoSample> FlacBuilder<'data, Sample> {
         }
     }
 
+    /// See https://xiph.org/flac/api/group__flac__stream__encoder.html#gaacc01aab02849119f929b8516420fcd3
     pub fn compression_level(mut self, level: u32) -> Self {
         self.compression_level = level;
         self
     }
 
+    /// Set bits per sample.
     pub fn bps(mut self, bps: BpsLevel) -> Self {
         self.bps = bps;
         self
