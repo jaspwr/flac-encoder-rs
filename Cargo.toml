@@ -10,3 +10,8 @@ keywords = ["audio", "flac", "encoder", "libflac"]
 
 [dependencies]
 libflac-sys = "0.3.2"
+
+[profile.release]
+strip = true
+opt-level = "z"
+panic = "abort"
