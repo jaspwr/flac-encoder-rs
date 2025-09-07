@@ -1,9 +1,9 @@
 # flac-encoder-rs
-Rust Flac encoder that uses libflac.
+High-level Rust Flac encoder that uses libflac.
 
 ## Examples
 ### Planar Buffer To `Vec<u8>`
-```rs
+```rust
 let flac_data = flac_encoder::FlacBuilder::from_planar(data, sample_rate)
     .compression_level(5)
     .artist("Jane Doe")
@@ -13,7 +13,7 @@ let flac_data = flac_encoder::FlacBuilder::from_planar(data, sample_rate)
 ```
 
 ### Interleaved Buffer To File
-```rs
+```rust
 flac_encoder::FlacBuilder::from_interleaved(data, channels, sample_rate)
     .artist("John Doe")
     .title("My Track")

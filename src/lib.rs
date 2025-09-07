@@ -327,7 +327,7 @@ pub enum BpsLevel {
 }
 
 impl BpsLevel {
-    pub fn to_u32(&self) -> u32 {
+    fn to_u32(&self) -> u32 {
         match self {
             BpsLevel::Bps16 => 16,
             BpsLevel::Bps20 => 20,
@@ -336,12 +336,12 @@ impl BpsLevel {
     }
 }
 
-pub struct WriteCallbackData {
-    pub data: Vec<u8>,
-    pub cursor: usize,
+struct WriteCallbackData {
+    data: Vec<u8>,
+    cursor: usize,
 }
 
-pub enum InputData<'a, Sample>
+enum InputData<'a, Sample>
 where
     Sample: IntoSample,
 {
